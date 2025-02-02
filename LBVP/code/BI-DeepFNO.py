@@ -4,6 +4,8 @@ Modified based on  Zongyi Li's code
 """
 
 import random
+import sys
+from matplotlib.ticker import MaxNLocator
 import pandas as pd
 from scipy import io as sio
 import torch
@@ -14,21 +16,36 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 import matplotlib.pyplot as plt
-import test_Numerical as tn
+import torch.backends.cudnn as cudnn
+
+cudnn.benchmark = True
+
+# import test_Numerical as tn
 import os
 import time
 import operator
 from functools import reduce
 from functools import partial
 from timeit import default_timer
+
+current_path = os.path.dirname(os.path.abspath(__file__))
+src_path = os.path.join(current_path, "../../src/")
+
+if src_path in sys.path:
+    sys.path.remove(src_path)
+
+sys.path.insert(0, src_path)
+
 from utilities3 import *
-import scipy
+import test_Numerical as tn
+
+# import scipy
 
 
 print("\n=============================")
 print("torch.cuda.is_available(): " + str(torch.cuda.is_available()))
 if torch.cuda.is_available():
-    print("torch.cuda.get_device_name(0): " + str(torch.cuda.get_device_name(0)))
+    print("torch.cuda.get_device_name(): " + str(torch.cuda.get_device_name()))
 print("=============================\n")
 
 
@@ -101,12 +118,13 @@ class FNO1d(nn.Module):
 
         self.modes1 = modes
         self.width = width
-        self.fc0 = nn.Linear(1, self.width)  # input channel is 2: (a(x), x)
+        self.fc0 = nn.Linear(2, self.width)  # input channel is 2: (a(x), x)
 
         self.conv0 = SpectralConv1d(self.width, self.width, self.modes1)
         self.conv1 = SpectralConv1d(self.width, self.width, self.modes1)
         self.conv2 = SpectralConv1d(self.width, self.width, self.modes1)
         self.conv3 = SpectralConv1d(self.width, self.width, self.modes1)
+
         self.w0 = nn.Conv1d(self.width, self.width, 1)
         self.w1 = nn.Conv1d(self.width, self.width, 1)
         self.w2 = nn.Conv1d(self.width, self.width, 1)
@@ -117,17 +135,17 @@ class FNO1d(nn.Module):
 
         self.don = DeepONet(
             [
-                [256, 128, 128, 128, 128],
-                [128, 128, 128, 128, 128],
-                [1, 128, 128, 128, 128],
+                [256, 560, 560, 560, 560],
+                [128, 560, 560, 560, 560],
+                [1, 560, 560, 560, 560],
             ]
         )
 
     def forward(self, x):
 
         xd = self.don(x)
-        # x = torch.cat([xd.reshape(xd.shape[0],xd.shape[1],1), x[:,:,3:]], dim=2)
-        x = xd.reshape(xd.shape[0], xd.shape[1], 1)
+        x = torch.cat([xd.reshape(xd.shape[0], xd.shape[1], 1), x[:, :, 3:]], dim=2)
+        # x = xd.reshape(xd.shape[0], xd.shape[1], 1)
         x = self.fc0(x)
         x = x.permute(0, 2, 1)
 
@@ -177,7 +195,7 @@ class DeepONet(nn.Module):
 
         # Define branch2 network layers
         self.branch_layers2 = nn.ModuleList()
-        for i in range(len(self.Layers_branch1) - 1):
+        for i in range(len(self.Layers_branch2) - 1):
             self.branch_layers2.append(
                 nn.Linear(self.Layers_branch2[i], self.Layers_branch2[i + 1])
             )
@@ -196,7 +214,6 @@ class DeepONet(nn.Module):
         branch_input2 = x[..., 2]
         trunk_input = x[..., 3]
         trunk_input = trunk_input[0, :].unsqueeze(1)
-
         # print(branch_input.shape,trunk_input.shape,"I AM TRUNK")
 
         # Forward pass through the branch network
@@ -217,20 +234,6 @@ class DeepONet(nn.Module):
         # Combining both outputs
         output = torch.matmul(branch_output, trunk_output.transpose(0, 1))
         return output
-
-
-class CustomDataset(Dataset):
-    def __init__(self, x_train, grid, y_train):
-        self.x_train = x_train  # 假设 x_train 是需要批处理的数据部分
-        self.grid = grid  # grid 是在每个批次中完整读入的部分
-        self.y_train = y_train  # 标签数据
-
-    def __len__(self):
-        return len(self.x_train)  # 数据集大小由 x_train 决定
-
-    def __getitem__(self, idx):
-        # 返回 x_train 的第 idx 项，完整的 grid，以及 y_train 的第 idx 项
-        return (self.x_train[idx], self.grid), self.y_train[idx]
 
 
 def to_point(p, t):
@@ -264,12 +267,6 @@ def to_point(p, t):
     return phi
 
 
-def rse_loss(output, target):
-    # 确保输出和目标具有相同的形状
-    loss = torch.sum((output - target) ** 2) / torch.sum(target**2)
-    return loss
-
-
 def FNO_main(train_data_res, save_index):
     """
     Parameters
@@ -286,42 +283,52 @@ def FNO_main(train_data_res, save_index):
     # sub = 2**6 #subsampling rate
     sub = 2**13 // s  # subsampling rate (step size)
 
-    batch_size = 11996 // 4
+    batch_size = 2**13
     learning_rate = 0.001
 
-    epochs = 1  # default 500
+    epochs = 5000  # default 500
     step_size = 500  # default 100
+
     gamma = 0.5
 
     modes = 10
     width = 128
-
+    print(
+        f"Batch Size: {batch_size}, Learning Rate: {learning_rate}, Epochs: {epochs}, step_size:{step_size}, lr_decay: {gamma}"
+    )
     ################################################################
     # read training data
     ################################################################
-
-    name = "BI-DeepFNO_EDP"
-    print(name)
+    torch.cuda.set_device(1)
     # Data is of the shape (number of samples, grid size)
-    begin = time.time()
-    dataloader = MatReader(
-        "/home/ext8/mengbin/BI-TDONet_datasets/LBVP/data_exterior_Dirichlet_problem/data.mat"
-    )
+    path = "/home/ext8/mengbin/BI-TDONet_update/LBVP/data_exterior_Neumann_problem"
+    words = os.path.basename(path).split("_")[-3:]
+    problem = "".join(word[0] for word in words).upper()
+    print(problem)
+
+    start_time = time.time()
+
+    data_path = path + "/data.mat"
+    print("Data location:", data_path)
+    dataloader = MatReader(data_path)
     para = dataloader.read_field("para")
     phi = dataloader.read_field("phi")
     f = dataloader.read_field("f")
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Data reading time: {elapsed_time:.4f} seconds")
     m = f.shape[0]
-    random.seed(1024)
+    random.seed(1117)
     idx = np.array(range(m))
     random.shuffle(idx)
     para = para[idx, :]
     phi = phi[idx, :]
     f = f[idx, :]
-    end = time.time()
-    print("准备数据用时：", end - begin)
+
     M = 128
     N = (f.shape[1] - 1) // 2
-
+    name = f"LBVP_BI-DeepFNO_{problem}_0111"
+    print(name)
     para_train = para[0 : 8 * m // 10, :]
     para_test = para[8 * m // 10 :, :]
     phi_train = phi[0 : 8 * m // 10, :]
@@ -379,15 +386,21 @@ def FNO_main(train_data_res, save_index):
         dim=2,
     )
 
+    print("Shape of Training Dataset :", x_train.shape, y_train.shape)
+
     train_loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(x_train, y_train),
         batch_size=batch_size,
         shuffle=True,
+        num_workers=2,
+        pin_memory=True,
     )
     test_loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(x_test, y_test),
-        batch_size=batch_size,
+        batch_size=y_test.shape[0] // 100,
         shuffle=False,
+        num_workers=2,
+        pin_memory=True,
     )
 
     # model
@@ -408,10 +421,12 @@ def FNO_main(train_data_res, save_index):
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer, step_size=step_size, gamma=gamma
     )
-    # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_fn)
-    # patience = max(20, epochs // 100)
-    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=patience, verbose=True, min_lr=1e-18)
 
+    traced_model = torch.jit.trace(
+        model.eval(), torch.tensor(x_test[0:2, :], dtype=torch.float32).cuda()
+    )
+    jit_model = torch.jit.freeze(traced_model)
+    print("JIT Model loaded!")
     start_time = time.time()
     myloss = LpLoss(size_average=False)
     train_losses = []
@@ -428,7 +443,7 @@ def FNO_main(train_data_res, save_index):
             # x = [item.cuda() for item in x]
             # y=y.cuda()
             x, y = x.cuda(), y.cuda()
-
+            batch_size = x.shape[0]
             optimizer.zero_grad()
             out = model(x)
 
@@ -454,11 +469,11 @@ def FNO_main(train_data_res, save_index):
 
             for x, y in test_loader:
                 x, y = x.cuda(), y.cuda()
-                out = model(x)
+                # out = model(x)
+                out = jit_model(x)
+                batch_size = x.shape[0]
                 # out = y_normalizer.decode(out.view(batch_size, -1))
-                test_l2 += myloss(
-                    out.view(batch_size, -1), y.view(batch_size, -1)
-                ).item()
+                test_l2 += myloss(out, y).item()
 
         train_mse /= len(train_loader)
         train_l2 /= ntrain
@@ -468,9 +483,11 @@ def FNO_main(train_data_res, save_index):
         test_losses.append(test_l2)
 
         t2 = default_timer()
+        # scheduler.step(test_l2)
+
         current_lr = optimizer.param_groups[0]["lr"]
         print(
-            "Epoch: %d, time: %.3f, Train Loss: %.3e,  Test l2: %.4f, lr: %.4f,"
+            "Epoch: %d, time: %.3f, Train Loss: %.4e,  Test l2: %.4e, lr: %.4e,"
             % (ep, t2 - t1, train_l2, test_l2, current_lr)
         )
         # print(ep, t2-t1, train_mse, train_l2, test_l2)
@@ -478,11 +495,10 @@ def FNO_main(train_data_res, save_index):
     elapsed = time.time() - start_time
 
     # Save the model state dictionary
-    # 创建文件夹（如果不存在）
     os.makedirs(checkpoint_save_path, exist_ok=True)
     torch.save(
         model.state_dict(),
-        "/home/mengbin/operator_learning/BI-TDONet/LBVP/model/%s/%s" % (name, name),
+        "model/%s/%s" % (name, name),
     )
 
     print("\n=============================")
@@ -491,149 +507,28 @@ def FNO_main(train_data_res, save_index):
     print("Training time: %.3f" % (elapsed))
     print("=============================\n")
 
-    x_test = x_test.cuda()
-    y_test = y_test.cuda()
-
-    # 获取总数据量和每个批次的大小
-    total_size = x_test.shape[0]
-    batch_size = total_size // 2999
-
-    # 用于存储每个批次的误差
-    errors = []
-    errors1 = []
-    tt = []
-    for i in range(2999):
-
-        start_idx = i * batch_size
-        end_idx = start_idx + batch_size
-
-        # 获取当前批次的数据
-        x_batch = x_test[start_idx:end_idx]
-        y_batch = y_test[start_idx:end_idx]
-
-        # 计算模型输出并处理维度
-        begin = time.time()
-        pred_batch = model(x_batch).cuda()
-        end = time.time()
-        tt.append(end - begin)
-        pred_batch = torch.squeeze(
-            pred_batch, axis=2
-        )  # 确保预测输出与y_batch的维度一致
-
-        # 计算当前批次的误差
-        mse = torch.mean(torch.norm(pred_batch - y_batch, dim=1))
-        errors1.append(mse.item())
-        batch_error = torch.mean(mse / torch.norm(y_batch, dim=1))
-        errors.append(batch_error.item())
-
-    # 计算所有批次的平均误差
-    print(
-        "The average inference time per sample is %s milliseconds ."
-        % (np.sum(tt) * 1000 / total_size)
-    )
-    average_error1 = sum(errors1) / len(errors1)
-    variance1 = np.var(errors1)
-    # variance1 = sum((x - average_error1) ** 2 for x in errors1) / len(errors1)
-    print(
-        "Average l2 relative error and variance across all batches:",
-        average_error1,
-        variance1,
-    )
-
-    average_error = sum(errors) / len(errors)
-    # variance = sum((x - average_error) ** 2 for x in errors) / len(errors)
-    variance = np.var(errors)
-    print(
-        "Average l2 Norm error and variance across all batches:",
-        average_error,
-        variance,
-    )
     # ====================================
     # saving settings
     # ====================================
-    # current_directory = os.getcwd()
-    # resolution = "TrainRes_"+str(train_data_res)
-    # folder_index = str(save_index)
 
-    # results_dir = "/results/" + resolution +"/" + folder_index +"/"
-    # save_results_to = current_directory + results_dir
-    # if not os.path.exists(save_results_to):
-    #     os.makedirs(save_results_to)
-    # model_dir = "/model/" + resolution +"/" + folder_index +"/"
-    # save_models_to = current_directory + model_dir
-    # if not os.path.exists(save_models_to):
-    #     os.makedirs(save_models_to)
+    current_directory = os.getcwd()
+    resolution = "TrainRes_" + str(train_data_res)
+    folder_index = str(save_index)
 
-    ################################################################
-    # testing
-    ################################################################
-    t = np.linspace(0, 2 * np.pi * (1 - 1 / M), M)
-    t1 = np.linspace(0, 2 * np.pi, M)
-    r = random.randint(0, m1)
-    para_f = para_test[r : r + 1, :].numpy()
-    px = np.reshape(para_f[:, : 2 * N + 1], [1, -1])
-    py = np.reshape(para_f[:, 2 * N + 1 :], [1, -1])
-    x = tn.to_point(px, t)
-    y = tn.to_point(py, t)
-    f_f = f_test[r : r + 1, :].numpy()
-    phi_true_f = phi_test[r : r + 1, :].numpy()
-    f = tn.to_point(f_f, t)
-    # f = 2 * f
+    results_dir = "/results/" + resolution + "/" + folder_index + "/"
+    save_results_to = current_directory + results_dir
+    if not os.path.exists(save_results_to):
+        os.makedirs(save_results_to)
+    model_dir = "/model/" + resolution + "/" + folder_index + "/"
+    save_models_to = current_directory + model_dir
+    if not os.path.exists(save_models_to):
+        os.makedirs(save_models_to)
+    # Save loss data to a CSV file
+    loss_data = pd.DataFrame(train_losses, columns=["Train MSE", "Train L2"])
+    loss_data["Test L2"] = test_losses
+    loss_data.to_csv(f"loss/{name}.csv", index=False)
 
-    x = np.reshape(x, [1, -1])
-    y = np.reshape(y, [1, -1])
-    maxx = np.max(x)
-    minx = np.min(x)
-    maxy = np.max(y)
-    miny = np.min(y)
-    xx = np.linspace(minx - (maxx - minx) / 2, maxx + (maxx - minx) / 2, 500)
-    yy = np.linspace(miny - (maxy - miny) / 2, maxy + (maxy - miny) / 2, 500)
-
-    pointx, pointy = np.meshgrid(xx, yy)
-    index, x1, y1 = tn.determine(x, y, pointx, pointy, min=0.03, I=False)
-    out_data = np.concatenate([x1, y1], axis=1)
-    # 将 x 和 y 转换为张量，并且调整形状为 (ntrain, s, 1)，统一转换为 float 类型
-    x_tensor = torch.tensor(x, dtype=torch.float)
-    y_tensor = torch.tensor(y, dtype=torch.float)
-
-    # 假设 f 是一个向量，需要重复到每个样本和每个时间步，并转换为 float 类型
-    f_tensor = torch.tensor(f, dtype=torch.float)
-    # 假设 t 也是一个向量，需要调整形状并转换为 float 类型
-    grid = torch.tensor(np.reshape(t, [-1, 1]), dtype=torch.float)
-
-    # 将所有张量在最后一个维度上进行拼接
-    input = torch.cat(
-        [
-            x_tensor.reshape(1, s, 1),
-            y_tensor.reshape(1, s, 1),
-            f_tensor.reshape(1, s, 1),
-            grid.repeat(1, 1, 1),
-        ],
-        dim=2,
-    ).cuda()
-    # input = torch.cat([x_tensor, y_tensor, f_tensor, grid], dim=2)  # 沿着第三个维度拼接
-
-    phi_predict = np.reshape(model(input).detach().cpu().numpy(), [1, -1])
-    phi_predict_fourier = np.reshape(
-        np.fft.fft(phi_predict * np.sqrt(2 * np.pi) / M), [1, -1]
-    )
-    phi_predict_f = tn.resort_fourier(phi_predict_fourier, N)
-    EDP = tn.EDP(M, N, para_f)
-    u_predict = EDP.phi_to_pde(
-        phi_predict_f,
-        out_data,
-    )
-    # print(u_predict.shape)
-    U_pred = tn.block(index, u_predict)
-
-    u_true = EDP.phi_to_pde(
-        phi_true_f,
-        out_data,
-    )
-    U_true = tn.block(index, u_true)
-    X = pointx
-    Y = pointy
-
+    loss_data = pd.read_csv(f"loss/{name}.csv")
     plt.rcParams.update(
         {
             # "text.usetex": True,
@@ -644,23 +539,159 @@ def FNO_main(train_data_res, save_index):
     )
     plt.figure(figsize=(8, 6))
     plt.plot(
+        np.reshape(np.log10(loss_data["Train L2"]).ravel(), [-1, 1]),
+        linewidth=5.0,
+        label="BI-DeepFNO \n Training loss",
+    )
+    plt.plot(
+        np.reshape(np.log10(loss_data["Test L2"].ravel()), [-1, 1]),
+        linewidth=5.0,
+        label="BI-DeepFNO \n Testing loss",
+    )
+    plt.xlabel("Epoch", fontweight="bold")
+    plt.ylabel("lg(MRE)", fontweight="bold")
+    plt.legend()
+    plt.title("BI-DeepFNO Loss", fontweight="bold")
+    # Set axis properties
+    ax = plt.gca()  # Get the current axis object
+    ax.yaxis.set_major_locator(
+        MaxNLocator(integer=True)
+    )  # Ensure Y-axis has integer tick marks
+    plt.tight_layout(pad=0)
+    plt.savefig(
+        f"../Figures/{name}_loss.pdf",
+        format="pdf",
+        bbox_inches="tight",
+    )
+    plt.savefig(
+        f"../Figures/{name}_loss.eps",
+        format="eps",
+        bbox_inches="tight",
+    )
+
+    # ====================================
+    # testing
+    # ====================================
+
+    x_test = x_test
+    y_test = y_test
+
+    batch = 100
+    total_size = x_test.shape[0]
+    batch_size = total_size // batch
+
+    errors, errors1, tt = [], [], []
+
+    # Ensure the last batch is handled when the dataset size is not divisible by batch_size
+    for i in range(
+        0, len(x_test), batch_size
+    ):  # Loop through the dataset with step size of batch_size
+        end_idx = min(i + batch_size, len(x_test))  # Prevent out-of-bounds indexing
+        x_batch, y_batch = x_test[i:end_idx], y_test[i:end_idx]
+        x_batch, y_batch = x_batch.cuda(), y_batch.cuda()
+        start_time = time.time()
+        pred_batch = model(x_batch)
+        tt.append(time.time() - start_time)
+
+        pred_batch = torch.squeeze(pred_batch, axis=2)
+
+        mae = torch.mean(torch.norm(pred_batch - y_batch, dim=1))
+        errors1.append(mae.item())
+        errors.append(torch.mean(mae / torch.norm(y_batch, dim=1)).item())
+
+    # Output average inference time
+    avg_inference_time = np.sum(tt) / m1 * 1000
+    print(f"Average inference time = {avg_inference_time:.4e} milliseconds")
+
+    # Calculate average error and variance
+    average_error1 = np.mean(errors1)
+    variance1 = np.var(errors1)
+    print(
+        f"Average l2 error and variance across all batches: {average_error1:.4e}, {variance1:.4e}"
+    )
+
+    average_error = np.mean(errors)
+    variance = np.var(errors)
+    print(
+        f"Average l2  relative error and variance across all batches: {average_error:.4e}, {variance:.4e}"
+    )
+
+    # ====================================
+    # Example
+    # ====================================
+    t = np.linspace(0, 2 * np.pi, M, endpoint=False)
+    t1 = np.linspace(0, 2 * np.pi, M)
+    r1 = random.randint(0, m1)
+    r2 = random.randint(0, m1)
+
+    para = np.reshape(para_test[r1].numpy(), [1, -1])
+    phi_true_f = np.reshape(phi_test[r1].numpy(), [1, -1])
+    f_f = np.reshape(f_test[r1].numpy(), [1, -1])
+    px = np.reshape(para[0, : 2 * N + 1], [1, -1])
+    py = np.reshape(para[0, 2 * N + 1 :], [1, -1])
+    x = tn.to_point(px, t)
+    y = tn.to_point(py, t)
+    f = tn.to_point(f_f, t)
+    f_fourier = np.fft.fft(f) * np.sqrt(2 * np.pi) / M
+    x = np.reshape(x, [1, -1])
+    y = np.reshape(y, [1, -1])
+    maxx = np.max(x)
+    minx = np.min(x)
+    maxy = np.max(y)
+    miny = np.min(y)
+    if problem in {"IDP", "INP"}:
+        xx = np.linspace(minx, maxx, 500)
+        yy = np.linspace(miny, maxy, 500)
+        pointx, pointy = np.meshgrid(xx, yy)
+        index, x1, y1 = tn.determine(x, y, pointx, pointy, min=0.03, I=True)
+    else:
+        xx = np.linspace(minx - (maxx - minx) / 2, maxx + (maxx - minx) / 2, 500)
+        yy = np.linspace(miny - (maxy - miny) / 2, maxy + (maxy - miny) / 2, 500)
+        pointx, pointy = np.meshgrid(xx, yy)
+        index, x1, y1 = tn.determine(x, y, pointx, pointy, min=0.03, I=False)
+    out_data = np.concatenate([x1, y1], axis=1)
+    L = getattr(tn, problem)(M, para)
+    phi_true_f = np.reshape(phi_true_f, [1, -1])
+    start = time.time()
+    input = x_test[r1 : r1 + 1].cuda()
+    phi_predict = model(input)
+    phi_predict = phi_predict.detach().cpu().numpy().reshape(1, -1)
+    phi_predict_fourier = np.reshape(
+        np.fft.fft(phi_predict * np.sqrt(2 * np.pi) / M), [1, -1]
+    )
+    phi_predict_f = tn.resort_fourier(phi_predict_fourier, N)
+    end = time.time()
+
+    # This makes the text bold)
+    # plt.rcParams["font.family"] = "serif"
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(
         np.reshape(t1, [-1, 1]),
         np.reshape(tn.to_point(phi_true_f, t1), [-1, 1]),
         linewidth=5.0,
         label="true",
     )
     plt.plot(
-        np.reshape(t1, [-1, 1]),
-        np.reshape(tn.to_point(phi_predict_f, t1), [-1, 1]),
+        np.reshape(t, [-1, 1]),
+        np.reshape(phi_predict, [-1, 1]),
         linewidth=5.0,
         label="predict",
         linestyle="dashed",
     )
     plt.legend()
-    plt.xlabel(r"$t$")
-    plt.ylabel(r"$\varphi$(t)")
-    plt.title("The output of BI-DeepONet")
-    plt.tight_layout()  # 使用 tight_layout 自动调整
+    plt.xlabel(r"$t$", font={"size": 25})
+    plt.ylabel(r"$\varphi$(t)", font={"size": 25})
+    plt.title("The output of BI-DeepFNO", font={"size": 25})
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
+    # plt.savefig(
+    #     f"../Figures/{name}_phi_1.eps",
+    #     format="eps",
+    # )
+    # plt.savefig(
+    #     f"../Figures/{name}_phi_1.pdf",
+    #     format="pdf",
+    # )
 
     plt.figure(figsize=(8, 6))
     plt.plot(
@@ -668,54 +699,66 @@ def FNO_main(train_data_res, save_index):
         np.reshape(tn.to_point(f_f, t1), [-1, 1]),
         linewidth=5.0,
     )
-    plt.title(r"$\widetilde{f}(t)$")
-    plt.xlabel(r"$t$")
-    plt.ylabel(r"$\widetilde{f}(t)$")
-    plt.tight_layout()  # 使用 tight_layout 自动调整
+    plt.title(r"$\widetilde{f}(t)$", font={"size": 25})
+    plt.xlabel(r"$t$", font={"size": 25})
+    plt.ylabel(r"$\widetilde{f}(t)$", font={"size": 25})
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
 
     plt.figure(figsize=(8, 6))
+
     plt.plot(
         np.reshape(tn.to_point(px, t1), [-1, 1]),
         np.reshape(tn.to_point(py, t1), [-1, 1]),
         linewidth=5.0,
     )
-    plt.xlabel(r"$\widetilde{{\gamma}}_1(t)$")
-    plt.ylabel(r"$\widetilde{{\gamma}}_2(t)$")
-    plt.title("boundary")
-    plt.tight_layout()  # 使用 tight_layout 自动调整
+    plt.xlabel(r"$\widetilde{{\gamma}}_1(t)$", font={"size": 25})
+    plt.ylabel(r"$\widetilde{{\gamma}}_2(t)$", font={"size": 25})
+    plt.title("boundary", font={"size": 25})
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
 
-    # plt.figure(figsize=(8, 6))
-    # plt.plot(
-    #     np.reshape(tn.to_point(phi_predict_f, t1), [-1, 1])
-    #     - np.reshape(tn.to_point(phi_true_f, t1), [-1, 1]),
-    #     label="Error",
-    # )
-    # plt.title("Error of BI-DeepONet")
-    # plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
+    plt.figure(figsize=(8, 6))
+    plt.plot(
+        np.reshape(phi_predict, [-1, 1])
+        - np.reshape(tn.to_point(phi_true_f, t), [-1, 1]),
+        label="Error",
+    )
+    plt.title("Error of BI-DeepFNO")
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
 
+    print("Model Time is:", (end * 1000 - start * 1000))
+    # phi_true = np.reshape(phi_true, [-1, 1])
     print(
-        "Example: MNE of phi is ===>",
+        "Example 1: MAE of phi is ===>",
         np.linalg.norm((phi_predict_f) - (phi_true_f)),
     )
     print(
-        "Example: MRE of phi is ===>",
+        "Example 1: MRE of phi is ===>",
         np.linalg.norm((phi_predict_f) - (phi_true_f)) / np.linalg.norm((phi_true_f)),
     )
+    phi_predict = np.reshape(phi_predict, [1, -1])
+    phi_true = np.reshape(phi_true_f, [1, -1])
+    u_predict = L.phi_to_pde(phi_predict_f, out_data)
+    # u_predict =  L1.phi_to_pde(phi_predict, out_data)
+    u_true = L.phi_to_pde(phi_true_f, out_data)
+    mae = np.linalg.norm((u_predict - u_true))
+    mre = np.linalg.norm((u_predict - u_true)) / np.linalg.norm((u_true))
+    print("Example 1: MAE of u is ===>", mae)
+    print("Example 1: MRE of u is ===>", mre)
+    x = np.reshape(x, [1, -1])
+    y = np.reshape(y, [1, -1])
+    U_true = tn.block(index, u_true)
+    U_pred = tn.block(index, u_predict)
+    X = pointx
+    Y = pointy
 
     plt.figure(figsize=(8, 6))
-    plt.pcolormesh(
-        X,
-        Y,
-        U_true,
-        cmap="jet",
-        shading="gouraud",
-    )  # 彩虹热力图
-    plt.title("True")
-    plt.xlabel(r"$x$")
-    plt.ylabel(r"$y$")
+    plt.pcolormesh(X, Y, U_true, cmap="jet", shading="gouraud")  # 彩虹热力图
+    # plt.contourf(X,Y,Z_true)
     plt.colorbar()
-    # cb.ax.tick_params(labelsize=20)
-    plt.tight_layout()  # 使用 tight_layout 自动调整
+    plt.xlabel(r"$x$", font={"size": 25})
+    plt.ylabel(r"$y$", font={"size": 25})
+    plt.title("True", font={"size": 25})
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
 
     plt.figure(figsize=(8, 6))
     plt.pcolormesh(
@@ -725,12 +768,188 @@ def FNO_main(train_data_res, save_index):
         cmap="jet",
         shading="gouraud",
     )  # 彩虹热力图
-    plt.title("Predict")
-    plt.xlabel(r"$x$")
-    plt.ylabel(r"$y$")
+    # plt.contourf(X,Y,Z_true)
+    plt.xlabel(r"$x$", font={"size": 25})
+    plt.ylabel(r"$y$", font={"size": 25})
+    plt.title("Predict", font={"size": 25})
     plt.colorbar()
-    # cb.ax.tick_params(labelsize=20)
-    plt.tight_layout()  # 使用 tight_layout 自动调整
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
+    # plt.savefig(
+    #     f"../Figures/{name}_pred_1.pdf",
+    #     format="pdf",
+    # )
+    plt.figure(figsize=(8, 6))
+    plt.pcolormesh(
+        X,
+        Y,
+        abs(U_true - U_pred),
+        cmap="jet",
+        shading="gouraud",
+        # vmin=-0.02,
+        # vmax=0.06,
+    )  # 彩虹热力图
+    # plt.contourf(X,Y,Z_true)
+    plt.xlabel(r"$x$", font={"size": 25})
+    plt.ylabel(r"$y$", font={"size": 25})
+    plt.title("Error", font={"size": 25})
+    plt.colorbar()
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
+    # plt.savefig(
+    #     f"../Figures/{name}_error_1.pdf",
+    #     format="pdf",
+    # )
+
+    para = np.reshape(para_test[r2].numpy(), [1, -1])
+    phi_true_f = np.reshape(phi_test[r2].numpy(), [1, -1])
+    f_f = np.reshape(f_test[r2].numpy(), [1, -1])
+    px = np.reshape(para[0, : 2 * N + 1], [1, -1])
+    py = np.reshape(para[0, 2 * N + 1 :], [1, -1])
+    x = tn.to_point(px, t)
+    y = tn.to_point(py, t)
+    f = tn.to_point(f_f, t)
+    f_fourier = np.fft.fft(f) * np.sqrt(2 * np.pi) / M
+    x = np.reshape(x, [1, -1])
+    y = np.reshape(y, [1, -1])
+    maxx = np.max(x)
+    minx = np.min(x)
+    maxy = np.max(y)
+    miny = np.min(y)
+    if problem in {"IDP", "INP"}:
+        xx = np.linspace(minx, maxx, 500)
+        yy = np.linspace(miny, maxy, 500)
+        pointx, pointy = np.meshgrid(xx, yy)
+        index, x1, y1 = tn.determine(x, y, pointx, pointy, min=0.03, I=True)
+    else:
+        xx = np.linspace(minx - (maxx - minx) / 2, maxx + (maxx - minx) / 2, 500)
+        yy = np.linspace(miny - (maxy - miny) / 2, maxy + (maxy - miny) / 2, 500)
+        pointx, pointy = np.meshgrid(xx, yy)
+        index, x1, y1 = tn.determine(x, y, pointx, pointy, min=0.03, I=False)
+    out_data = np.concatenate([x1, y1], axis=1)
+    L = getattr(tn, problem)(M, para)
+
+    start = time.time()
+    input = x_test[r2 : r2 + 1].cuda()
+    phi_predict = model(input)
+    phi_predict = phi_predict.detach().cpu().numpy().reshape(1, -1)
+    phi_predict_fourier = np.reshape(
+        np.fft.fft(phi_predict * np.sqrt(2 * np.pi) / M), [1, -1]
+    )
+    phi_predict_f = tn.resort_fourier(phi_predict_fourier, N)
+    end = time.time()
+    print(phi_predict_f)
+    print(phi_true_f)
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(
+        np.reshape(t1, [-1, 1]),
+        np.reshape(tn.to_point(phi_true_f, t1), [-1, 1]),
+        linewidth=5.0,
+        label="true",
+    )
+    plt.plot(
+        np.reshape(t, [-1, 1]),
+        np.reshape(phi_predict, [-1, 1]),
+        linewidth=5.0,
+        label="predict",
+        linestyle="dashed",
+    )
+    plt.legend()
+    plt.xlabel(r"$t$", font={"size": 25})
+    plt.ylabel(r"$\varphi$(t)", font={"size": 25})
+    plt.title("The output of BI-DeepFNO", font={"size": 25})
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
+    # plt.savefig(
+    #     f"../Figures/{name}_phi_2.eps",
+    #     format="eps",
+    # )
+    # plt.savefig(
+    #     f"../Figures/{name}_phi_2.pdf",
+    #     format="pdf",
+    # )
+    plt.figure(figsize=(8, 6))
+
+    plt.plot(
+        np.reshape(t1, [-1, 1]),
+        np.reshape(tn.to_point(f_f, t1), [-1, 1]),
+        linewidth=5.0,
+    )
+    plt.title(r"$\widetilde{f}(t)$", font={"size": 25})
+    plt.xlabel(r"$t$", font={"size": 25})
+    plt.ylabel(r"$\widetilde{f}(t)$")
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(
+        np.reshape(tn.to_point(px, t1), [-1, 1]),
+        np.reshape(tn.to_point(py, t1), [-1, 1]),
+        linewidth=5.0,
+    )
+    plt.xlabel(r"$\widetilde{{\gamma}}_1(t)$", font={"size": 25})
+    plt.ylabel(r"$\widetilde{{\gamma}}_2(t)$", font={"size": 25})
+    plt.title("boundary", font={"size": 25})
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(
+        np.reshape(phi_predict, [-1, 1])
+        - np.reshape(tn.to_point(phi_true_f, t), [-1, 1]),
+        label="Error",
+    )
+    plt.title("Error of BI-DeepFNO")
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
+
+    print("Model Time is:", (end * 1000 - start * 1000))
+    # phi_true = np.reshape(phi_true, [-1, 1])
+    print(
+        "Example 2: MAE of phi is ===>",
+        np.linalg.norm((phi_predict_f) - (phi_true_f)),
+    )
+    print(
+        "Example 2: MRE of phi is ===>",
+        np.linalg.norm((phi_predict_f) - (phi_true_f)) / np.linalg.norm((phi_true_f)),
+    )
+    phi_predict = np.reshape(phi_predict, [1, -1])
+    phi_true = np.reshape(phi_true_f, [1, -1])
+    u_predict = L.phi_to_pde(phi_predict_f, out_data)
+    u_true = L.phi_to_pde(phi_true_f, out_data)
+    mae = np.linalg.norm((u_predict - u_true))
+    mre = np.linalg.norm((u_predict - u_true)) / np.linalg.norm((u_true))
+    print("Example 2: MAE of u is ===>", mae)
+    print("Example 2: MRE of u is ===>", mre)
+    x = np.reshape(x, [1, -1])
+    y = np.reshape(y, [1, -1])
+    U_true = tn.block(index, u_true)
+    U_pred = tn.block(index, u_predict)
+    X = pointx
+    Y = pointy
+
+    plt.figure(figsize=(8, 6))
+    plt.pcolormesh(X, Y, U_true, cmap="jet", shading="gouraud")  # 彩虹热力图
+    # plt.contourf(X,Y,Z_true)
+    plt.colorbar()
+    plt.xlabel(r"$x$", font={"size": 25})
+    plt.ylabel(r"$y$", font={"size": 25})
+    plt.title("True", font={"size": 25})
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
+
+    plt.figure(figsize=(8, 6))
+    plt.pcolormesh(
+        X,
+        Y,
+        U_pred,
+        cmap="jet",
+        shading="gouraud",
+    )  # 彩虹热力图
+    # plt.contourf(X,Y,Z_true)
+    plt.xlabel(r"$x$", font={"size": 25})
+    plt.ylabel(r"$y$", font={"size": 25})
+    plt.title("Predict", font={"size": 25})
+    plt.colorbar()
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
+    # plt.savefig(
+    #     f"../Figures/{name}_pred_2.pdf",
+    #     format="pdf",
+    # )
 
     plt.figure(figsize=(8, 6))
     plt.pcolormesh(
@@ -739,13 +958,19 @@ def FNO_main(train_data_res, save_index):
         abs(U_true - U_pred),
         cmap="jet",
         shading="gouraud",
+        # vmin=-0.02,
+        # vmax=0.06,
     )  # 彩虹热力图
-    plt.title("Error")
-    plt.xlabel(r"$x$")
-    plt.ylabel(r"$y$")
+    # plt.contourf(X,Y,Z_true)
+    plt.xlabel(r"$x$", font={"size": 25})
+    plt.ylabel(r"$y$", font={"size": 25})
+    plt.title("Error", font={"size": 25})
     plt.colorbar()
-    # cb.ax.tick_params(labelsize=20)
-    plt.tight_layout()  # 使用 tight_layout 自动调整
+    plt.tight_layout(pad=0.2)  # 使用 tight_layout 自动调整
+    # plt.savefig(
+    #     f"../Figures/{name}_error_2.pdf",
+    #     format="pdf",
+    # )
     plt.show()
 
 
